@@ -1,0 +1,247 @@
+@* 
+    PCM Audio Playback Component for Blazor applications.
+    Provides audio playback functionality for both streamed and pre-loaded PCM audio data.
+*@
+@inject IJSRuntime JsRuntime
+@implements IAsyncDisposable
+
+<div class="_q">
+    @* Render child content with playback controls *@
+    @if (ChildContent is not null)
+    {
+        @ChildContent((EventCallback.Factory.Create(this, Process), AutoPlay))
+    }
+</div>
+
+@code {
+    /// <summary>
+    /// Child content render fragment that receives playback control parameters.
+    /// Parameters: (EventCallback for play/pause toggle, bool indicating current play state)
+    /// </summary>
+    [Parameter] public RenderFragment<(EventCallback, bool)>? ChildContent { get; set; }
+
+    /// <summary>
+    /// Observable stream of PCM audio data chunks to play.
+    /// When AutoPlay is true, playback begins automatically when data is received.
+    /// </summary>
+    [Parameter] public IObservable<byte[]>? StreamBytes { get; set; }
+
+    /// <summary>
+    /// Complete PCM audio data to play.
+    /// When AutoPlay is true, playback begins automatically after component initialization.
+    /// </summary>
+    [Parameter] public byte[]? Bytes { get; set; }
+
+    /// <summary>
+    /// Determines whether playback should start automatically.
+    /// Default: false
+    /// </summary>
+    [Parameter] public bool AutoPlay { get; set; }
+    
+    private IJSObjectReference? _module;
+    private IJSObjectReference? _instance;
+    private IDisposable? _subscription;
+    
+    /// <summary>
+    /// Initializes the JavaScript audio playback module after first render.
+    /// </summary>
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            try
+            {   
+                _module = await JsRuntime.InvokeAsync<IJSObjectReference>(
+                    "import", 
+                    "./_content/Snail.Toolkit.Blazor.Extensions.Microphone/pcm-playback.js");
+                _instance = await _module.InvokeAsync<IJSObjectReference>("create");
+                await InitializeHandling();
+            }
+            catch (Exception ex)
+            {
+                throw new Exception("Failed to initialize audio playback", ex);
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Handles parameter changes and reinitializes playback if needed.
+    /// </summary>
+    protected override async Task OnParametersSetAsync()
+    {
+        await InitializeHandling();
+    }
+
+    /// <summary>
+    /// Initializes the appropriate playback handler based on current parameters.
+    /// </summary>
+    private async Task InitializeHandling()
+    {
+        if (StreamBytes is not null && AutoPlay)
+        {
+            await InitializeStreamHandling();
+        }
+        
+        if (Bytes is not null && AutoPlay)
+        {
+            await InitializeBytesHandling();
+        }
+    }
+    
+    /// <summary>
+    /// Calculates the duration of PCM audio data.
+    /// </summary>
+    /// <param name="pcmData">Raw PCM audio data</param>
+    /// <param name="sampleRate">Audio sample rate (default: 48000)</param>
+    /// <param name="bytesPerSample">Bytes per sample (default: 2 for 16-bit)</param>
+    /// <param name="channels">Number of audio channels (default: 1 for mono)</param>
+    /// <returns>TimeSpan representing the audio duration</returns>
+    private static TimeSpan CalculatePcmDuration(byte[] pcmData, int sampleRate = 48000, 
+        int bytesPerSample = 2, int channels = 1)
+    {
+        var bytesPerFrame = bytesPerSample * channels;
+        var totalFrames = pcmData.Length / bytesPerFrame;
+        var totalSeconds = totalFrames / sampleRate;
+        var remainingFrames = totalFrames % sampleRate;
+        var fractionalSeconds = (double)remainingFrames / sampleRate;
+        return TimeSpan.FromSeconds(totalSeconds + fractionalSeconds);
+    }
+
+    /// <summary>
+    /// Initializes playback handling for pre-loaded byte array.
+    /// </summary>
+    private async Task InitializeBytesHandling()
+    {
+        if (Bytes is null) return;
+        
+        await Start();
+        _subscription?.Dispose();
+        
+        _subscription = Observable.Create<byte[]>(async (observer, token) =>
+            {
+                foreach (var chunk in BytesExtensions.Split(Bytes, 32 * 1024))
+                {
+                    token.ThrowIfCancellationRequested();
+                    var timespan = CalculatePcmDuration(chunk);
+                    
+                    observer.OnNext(chunk);
+                    await Task.Delay(timespan.Milliseconds, token);
+                }
+                observer.OnCompleted();
+            })
+            .SelectMany(async chunk => 
+            {
+                await OnNextAsync(chunk);
+                return Unit.Default;
+            })
+            .Subscribe(
+                _ => { /* Chunk processed */ },
+                ex => 
+                {
+                    if (ex is not OperationCanceledException)
+                        Console.WriteLine($"Error: {ex}");
+                },  
+                async () => { await Process(); }
+            );
+    }
+    
+    /// <summary>
+    /// Initializes playback handling for observable stream.
+    /// </summary>
+    private async Task InitializeStreamHandling()
+    {
+        if (_instance is null || StreamBytes is null) return;
+        
+        _subscription?.Dispose();
+        try
+        {
+            await Start();
+            _subscription = StreamBytes
+                .SelectMany(async chunk => {
+                    await OnNextAsync(chunk);
+                    return Unit.Default;
+                })
+                .Subscribe(
+                    _ => { /* Optional result handling */ },
+                    ex => Console.WriteLine($"Error: {ex}")
+                );
+        }
+        catch (Exception ex)
+        {
+            throw new Exception("Failed to initialize stream handling", ex);
+        }
+    }
+
+    /// <summary>
+    /// Handles incoming PCM audio chunks by sending them to JavaScript for playback.
+    /// </summary>
+    /// <param name="pcmChunk">PCM audio data chunk</param>
+    private async Task OnNextAsync(byte[] pcmChunk)
+    {
+        try
+        {
+            if (_instance is null) return;
+            
+            await _instance.InvokeVoidAsync("enqueueChunk", pcmChunk);
+        }
+        catch (Exception ex)
+        {
+            throw new Exception("Failed to process audio chunk", ex);
+        }
+    }
+    
+    /// <summary>
+    /// Toggles playback state between play and pause.
+    /// </summary>
+    private async Task Process()
+    {
+        if (AutoPlay)
+        {
+            await Stop();
+            AutoPlay = false;
+            _subscription?.Dispose();
+        }
+        else
+        {
+            await Start();
+            AutoPlay = true;
+            await InitializeHandling();
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+    
+    /// <summary>
+    /// Starts audio playback.
+    /// </summary>
+    private async Task Start()
+    {
+        if (_instance is null) return;
+        
+        await _instance.InvokeVoidAsync("start");
+    }
+    
+    /// <summary>
+    /// Stops audio playback.
+    /// </summary>
+    private async Task Stop()
+    {
+        if (_instance is null) return;
+        
+        await _instance.InvokeVoidAsync("stop");
+    }
+    
+    /// <summary>
+    /// Cleans up resources when component is disposed.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        _subscription?.Dispose();
+        
+        if (_module is not null) 
+            await _module.DisposeAsync();
+        
+        if (_instance is not null) 
+            await _instance.DisposeAsync();
+    }
+}

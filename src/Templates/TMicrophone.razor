@@ -1,0 +1,201 @@
+@* 
+    Microphone Capture Component for Blazor applications.
+    Provides microphone access and PCM audio capture functionality.
+*@
+@inject IJSRuntime JsRuntime
+@implements IAsyncDisposable
+
+<div class="_q">
+    @* Render child content with microphone control *@
+    @if (ChildContent is not null)
+    {
+        @ChildContent((EventCallback.Factory.Create(this, Process), Enable))
+    }
+</div>
+
+@code {
+    /// <summary>
+    /// Child content render fragment that receives microphone control parameters.
+    /// Parameters: (EventCallback for start/stop toggle, bool indicating current microphone state)
+    /// </summary>
+    [Parameter] public RenderFragment<(EventCallback, bool)>? ChildContent { get; set; }
+
+    /// <summary>
+    /// Callback that provides an observable stream of captured PCM audio data.
+    /// The component will push audio chunks to this observable when microphone is active.
+    /// </summary>
+    [Parameter] public EventCallback<IObservable<byte[]>> StreamBytes { get; set; }
+
+    /// <summary>
+    /// Callback that receives the complete captured audio buffer when recording stops.
+    /// </summary>
+    [Parameter] public EventCallback<byte[]> Bytes { get; set; }
+
+    /// <summary>
+    /// Determines whether microphone should start capturing automatically.
+    /// Default: false
+    /// </summary>
+    [Parameter] public bool Enable { get; set; }
+    
+    private readonly Subject<byte[]> _subject = new();
+    private DotNetObjectReference<TMicrophone>? _dotNetRef;
+    private IJSObjectReference? _module;
+    private IJSObjectReference? _instance;
+    private IDisposable? _subscription;
+    private List<byte[]>? _buffer;
+
+    /// <summary>
+    /// Initializes the JavaScript microphone module after first render.
+    /// </summary>
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        { 
+            try
+            {
+                // Create .NET reference for JavaScript callbacks
+                _dotNetRef = DotNetObjectReference.Create(this);
+                
+                // Import JavaScript module
+                _module = await JsRuntime.InvokeAsync<IJSObjectReference>(
+                    "import", 
+                    "./_content/Snail.Toolkit.Blazor.Extensions.Microphone/pcm-processor.js");
+                
+                // Create microphone instance
+                _instance = await _module.InvokeAsync<IJSObjectReference>("create", _dotNetRef);
+            }
+            catch (Exception ex)
+            {
+                await DisposeAsync();
+                throw new Exception("Microphone initialization failed", ex);
+            }
+
+            // Initialize buffer if Bytes callback is configured
+            if (Bytes.HasDelegate)
+            {
+                InitializeBufferHandling();
+            }
+
+            // Start immediately if enabled
+            if (Enable)
+            {
+                await Start();
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Initializes the buffer collection for captured audio data.
+    /// </summary>
+    private void InitializeBufferHandling()
+    {
+        _subscription?.Dispose();
+        try
+        {
+            _buffer = [];
+            _subscription = _subject.Subscribe(onNext: bytes =>
+            {
+                _buffer?.Add(bytes);
+            });
+        }
+        catch (Exception ex)
+        {
+            throw new Exception("Failed to initialize buffer handling", ex);
+        }
+    }
+    
+    /// <summary>
+    /// JavaScript-invokable method that receives PCM audio chunks from the browser.
+    /// </summary>
+    /// <param name="chunk">Captured PCM audio data chunk</param>
+    /// <returns>Completed task</returns>
+    [JSInvokable("OnPcmChunk")]
+    public Task OnPcmChunk(byte[] chunk)
+    {
+        _subject.OnNext(chunk);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Toggles microphone state between start and stop.
+    /// </summary>
+    private async Task Process()
+    {
+        if (Enable)
+        {
+            await Stop();
+            Enable = false;
+        }
+        else
+        {
+            await Start();
+            Enable = true;    
+        }
+    }
+    
+    /// <summary>
+    /// Stops microphone capture and completes audio processing.
+    /// </summary>
+    private async Task Stop()
+    {
+        if (_instance is null) return;
+
+        try
+        {
+            await _instance.InvokeVoidAsync("stop");
+        }
+        catch (Exception ex)
+        {
+            await DisposeAsync();
+            throw new Exception("Error stopping microphone", ex);
+        }
+        
+        // Process complete buffer if Bytes callback is configured
+        if (Bytes.HasDelegate && _buffer?.Count > 0)
+        {
+            var combined = BytesExtensions.Unite(_buffer);
+            await Bytes.InvokeAsync(combined);  
+            _buffer = [];
+        }
+    }
+    
+    /// <summary>
+    /// Starts microphone capture.
+    /// </summary>
+    private async Task Start()
+    {
+        if (_instance is null) return;
+        
+        // Initialize stream if StreamBytes callback is configured
+        if (StreamBytes.HasDelegate)
+        {
+            await StreamBytes.InvokeAsync(_subject.AsObservable());   
+        }
+
+        try
+        {
+            await _instance.InvokeVoidAsync("start");
+        }
+        catch (Exception ex)
+        {
+            await DisposeAsync();
+            throw new Exception("Error starting microphone", ex);
+        }
+    }
+
+    /// <summary>
+    /// Cleans up resources when component is disposed.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        _subscription?.Dispose();
+        _subject.OnCompleted();
+        _dotNetRef?.Dispose();
+        
+        if (_module is not null) 
+            await _module.DisposeAsync();
+        
+        if (_instance is not null) 
+            await _instance.DisposeAsync();
+    }
+}
