@@ -203,7 +203,6 @@
         }
         else
         {
-            await Start();
             AutoPlay = true;
             await InitializeHandling();
         }
@@ -219,6 +218,7 @@
         if (_instance is null) return;
         
         await _instance.InvokeVoidAsync("start");
+        // await TryUnlockAudio();
     }
     
     /// <summary>
@@ -229,6 +229,23 @@
         if (_instance is null) return;
         
         await _instance.InvokeVoidAsync("stop");
+    }
+    
+    /// <summary>
+    /// Attempts to unlock the audio system by invoking the 'unlockAudio' JavaScript function.
+    /// </summary>
+    private async Task TryUnlockAudio()
+    {
+        if (_instance is null) return;
+        
+        try 
+        {
+            await _instance.InvokeVoidAsync("unlockAudio");
+        }
+        catch (Exception ex)
+        {
+            throw new Exception($"Audio unlock failed: {ex.Message}");
+        }
     }
     
     /// <summary>
