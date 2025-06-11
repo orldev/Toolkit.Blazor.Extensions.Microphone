@@ -11,7 +11,10 @@ export function create() {
     let context = null;
     let playbackNode = null;
     let audioUnlocked = false;
-
+    const MAX_CHUNK_SIZE = 32 * 1024; // 32KB maximum
+    // Reusable transfer buffer (avoids allocations)
+    let transferBuffer = new Int16Array(MAX_CHUNK_SIZE / 2); // 16384 samples max
+   
     /**
      * Disposes of all audio resources and cleans up.
      * @async
@@ -89,7 +92,10 @@ export function create() {
                 }
             }
             
-            playbackNode = new AudioWorkletNode(context, 'pcm-playback');
+            playbackNode = new AudioWorkletNode(context, 'pcm-playback', {
+                numberOfOutputs: 1,
+                outputChannelCount: [1] // Mono
+            });
             playbackNode.connect(context.destination);
         },
 
@@ -104,12 +110,30 @@ export function create() {
                 if (!audioUnlocked) {
                     unlockAudio();   
                 }
-                const buffer = new Int16Array(pcmBytes.length / 2);
-                const view = new DataView(Uint8Array.from(pcmBytes).buffer);
-                for (let i = 0; i < buffer.length; i++) {
-                    buffer[i] = view.getInt16(i * 2, true); // little-endian
+                // Calculate actual samples in this chunk (maybe less than 32KB)
+                const sampleCount = pcmBytes.length / 2; // 2 bytes per sample
+                const view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.length);
+
+                // Ensure transferBuffer is large enough (but reuse if possible)
+                if (transferBuffer.length < sampleCount) {
+                    transferBuffer = new Int16Array(sampleCount);
                 }
-                playbackNode.port.postMessage(buffer);
+
+                // Convert safely (only up to available data)
+                for (let i = 0; i < sampleCount; i++) {
+                    transferBuffer[i] = view.getInt16(i * 2, true); // Little-endian
+                }
+                
+                // Send only the used portion via zero-copy transfer
+                playbackNode.port.postMessage(
+                    transferBuffer.buffer.slice(0, sampleCount * 2), // Send only needed bytes
+                    [transferBuffer.buffer] // Transfer ownership
+                );
+
+                // Reinitialize if buffer was transferred
+                if (transferBuffer.buffer.byteLength === 0) {
+                    transferBuffer = new Int16Array(MAX_CHUNK_SIZE / 2);
+                }
             }
         },
 
