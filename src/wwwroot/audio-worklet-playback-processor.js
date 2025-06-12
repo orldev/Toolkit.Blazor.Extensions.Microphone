@@ -1,54 +1,115 @@
 class PCMPlaybackProcessor extends AudioWorkletProcessor {
     constructor() {
         super();
-        // 32KB chunk = 16384 Int16 samples (since 32KB = 32768 bytes ÷ 2 bytes per Int16)
-        this.BUFFER_SIZE = 16384; // Matches 32KB input chunks
-
-        // Double-buffer setup (front for reading, back for writing)
-        this.frontBuffer = new Float32Array(this.BUFFER_SIZE); // Active read buffer
-        this.backBuffer = new Float32Array(this.BUFFER_SIZE);  // Background write buffer
-        this.readPtr = 0; // Only need to track read position
-        this.writePtr = 0;
+        // Jitter buffer configuration
+        this.jitterBuffer = [];
+        this.currentBuffer = null;
+        this.readPtr = 0;
+        this.lastChunkHash = null;
         this.underrunCount = 0;
+        this.targetBufferSize = 3; // Target 3 chunks (~300-900ms buffer)
+        this.sampleRate = 48000;
+        this.isJitterBufferEmpty = false;
+        
+        // Smoothing filter for underruns
+        this.lastSample = 0;
 
         this.port.onmessage = (e) => {
+            // Create hash of incoming chunk to detect duplicates
+            const chunkHash = this._createHash(e.data);
+            if (chunkHash === this.lastChunkHash) {
+                return; // Skip duplicate chunk
+            }
+            this.lastChunkHash = chunkHash;
+
+            // Convert and store the new chunk
             const int16Data = new Int16Array(e.data);
-            // Ensure back buffer is large enough
-            if (this.backBuffer.length < int16Data.length) {
-                this.backBuffer = new Float32Array(int16Data.length);
-            }
-            // Convert and copy all received samples
+            const float32Data = new Float32Array(int16Data.length);
             for (let i = 0; i < int16Data.length; i++) {
-                this.backBuffer[i] = int16Data[i] / 32767;
+                float32Data[i] = int16Data[i] / 32767;
             }
-            // Swap buffers
-            [this.frontBuffer, this.backBuffer] = [this.backBuffer, this.frontBuffer];
-            this.readPtr = 0; // Reset read position after swap
+
+            this.jitterBuffer.push({
+                data: float32Data,
+                timestamp: currentTime
+            });
+            this.isJitterBufferEmpty = false;
+            
+            // Maintain optimal buffer size
+            this._optimizeBuffer();
         };
     }
 
+    _createHash(buffer) {
+        // Simple hash for duplicate detection (FNV-1a)
+        let hash = 2166136261;
+        const view = new Uint8Array(buffer);
+        for (let i = 0; i < Math.min(view.length, 100); i++) {
+            hash ^= view[i];
+            hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+        }
+        return hash >>> 0;
+    }
+
+    _optimizeBuffer() {
+        // Remove chunks older than 1 second
+        const now = currentTime;
+        this.jitterBuffer = this.jitterBuffer.filter(
+            chunk => now - chunk.timestamp < 1.0
+        );
+
+        // If buffer is too large, remove oldest chunks
+        while (this.jitterBuffer.length > this.targetBufferSize * 2) {
+            this.jitterBuffer.shift();
+        }
+    }
+
     process(_, outputs) {
-        const output = outputs[0]; // Get first output bus
-        const outputLen = output[0].length; // Length of first channel
+        const output = outputs[0];
+        const outputLen = output[0].length;
 
+        // Get new buffer if needed
+        if ((!this.currentBuffer || this.readPtr >= this.currentBuffer.length) &&
+            this.jitterBuffer.length > 0) {
+            this.currentBuffer = this.jitterBuffer.shift().data;
+            this.readPtr = 0;
+        }
+
+        // Process output frames
         for (let i = 0; i < outputLen; i++) {
-            if (this.readPtr < this.frontBuffer.length) {
-                // Handle mono/stereo dynamically
-                output[0][i] = this.frontBuffer[this.readPtr]; // Write to left channel
+            if (this.currentBuffer && this.readPtr < this.currentBuffer.length) {
+                // Normal playback
+                const sample = this.currentBuffer[this.readPtr++];
+                this.lastSample = sample;
 
-                // Only write to right channel if it exists
-                if (output.length > 1) {
-                    output[1][i] = this.frontBuffer[this.readPtr]; // Copy to right channel
+                for (let channel = 0; channel < output.length; channel++) {
+                    output[channel][i] = sample;
+                }
+            } else {
+                // Underrun handling
+                this.underrunCount++;
+
+                // Apply gentle fade-out using last good sample
+                this.lastSample *= 0.97;
+                for (let channel = 0; channel < output.length; channel++) {
+                    output[channel][i] = this.lastSample;
                 }
 
-                this.readPtr++;
-            } else {
-                // Underrun: fade-out both channels if they exist
-                output[0][i] *= 0.95;
-                if (output.length > 1) output[1][i] *= 0.95;
-                this.underrunCount++;
+                // Request more data if buffer is empty
+                if (this.jitterBuffer.length === 0 && this.isJitterBufferEmpty === false) {
+                    this.port.postMessage({ type: 'bufferUnderrun' });
+                    this.isJitterBufferEmpty = true;
+                }
             }
         }
+
+        // Dynamic buffer sizing based on network conditions
+        if (this.underrunCount > 2) {
+            this.targetBufferSize = Math.min(10, this.targetBufferSize + 1);
+        } else if (this.underrunCount === 0 && this.targetBufferSize > 3) {
+            this.targetBufferSize--;
+        }
+
         return true;
     }
 }

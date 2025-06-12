@@ -14,7 +14,8 @@ export function create() {
     const MAX_CHUNK_SIZE = 32 * 1024; // 32KB maximum
     // Reusable transfer buffer (avoids allocations)
     let transferBuffer = new Int16Array(MAX_CHUNK_SIZE / 2); // 16384 samples max
-   
+    let lastChunkSent = null;
+    
     /**
      * Disposes of all audio resources and cleans up.
      * @async
@@ -107,6 +108,13 @@ export function create() {
          */
         enqueueChunk(pcmBytes) {
             if (playbackNode) {
+                if (lastChunkSent &&
+                    pcmBytes.length === lastChunkSent.length &&
+                    pcmBytes.every((val, i) => val === lastChunkSent[i])) {
+                    return;
+                }
+                lastChunkSent = pcmBytes.slice();
+                
                 if (!audioUnlocked) {
                     unlockAudio();   
                 }
