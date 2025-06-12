@@ -41,6 +41,7 @@
     private IJSObjectReference? _module;
     private IJSObjectReference? _instance;
     private IDisposable? _subscription;
+    private bool _initialize;
     
     /// <summary>
     /// Initializes the JavaScript audio playback module after first render.
@@ -77,12 +78,12 @@
     /// </summary>
     private async Task InitializeHandling()
     {
-        if (StreamBytes is not null && AutoPlay)
+        if (StreamBytes is not null && AutoPlay && !_initialize)
         {
             await InitializeStreamHandling();
         }
         
-        if (Bytes is not null && AutoPlay)
+        if (Bytes is not null && AutoPlay && !_initialize)
         {
             await InitializeBytesHandling();
         }
@@ -114,6 +115,8 @@
     {
         if (Bytes is null) return;
         
+        _initialize = true;
+        _subscription?.Dispose();
         await Start();
         _subscription?.Dispose();
         
@@ -127,6 +130,7 @@
                     observer.OnNext(chunk);
                     await Task.Delay(timespan.Milliseconds, token);
                 }
+                await Task.Delay(500, token);
                 observer.OnCompleted();
             })
             .SelectMany(async chunk => 
@@ -152,6 +156,7 @@
     {
         if (_instance is null || StreamBytes is null) return;
         
+        _initialize = true;
         _subscription?.Dispose();
         try
         {
@@ -204,6 +209,7 @@
         }
         else
         {
+            _initialize = false;
             AutoPlay = true;
             await InitializeHandling();
         }
