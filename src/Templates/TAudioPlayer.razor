@@ -38,9 +38,15 @@
     /// </summary>
     [Parameter] public bool AutoPlay { get; set; }
     
+    /// <summary>
+    /// Gets or sets a callback that is invoked when the <see cref="AutoPlay"/> state changes.
+    /// </summary>
+    [Parameter] public EventCallback<bool> AutoPlayChanged { get; set; }
+    
     private IJSObjectReference? _module;
     private IJSObjectReference? _instance;
     private IDisposable? _subscription;
+    private bool _initialize;
     
     /// <summary>
     /// Initializes the JavaScript audio playback module after first render.
@@ -77,12 +83,12 @@
     /// </summary>
     private async Task InitializeHandling()
     {
-        if (StreamBytes is not null && AutoPlay)
+        if (StreamBytes is not null && AutoPlay && !_initialize)
         {
             await InitializeStreamHandling();
         }
         
-        if (Bytes is not null && AutoPlay)
+        if (Bytes is not null && AutoPlay && !_initialize)
         {
             await InitializeBytesHandling();
         }
@@ -114,8 +120,9 @@
     {
         if (Bytes is null) return;
         
-        await Start();
+        _initialize = true;
         _subscription?.Dispose();
+        await Start();
         
         _subscription = Observable.Create<byte[]>(async (observer, token) =>
             {
@@ -127,6 +134,7 @@
                     observer.OnNext(chunk);
                     await Task.Delay(timespan.Milliseconds, token);
                 }
+                await Task.Delay(500, token);
                 observer.OnCompleted();
             })
             .SelectMany(async chunk => 
@@ -152,11 +160,13 @@
     {
         if (_instance is null || StreamBytes is null) return;
         
+        _initialize = true;
         _subscription?.Dispose();
         try
         {
             await Start();
             _subscription = StreamBytes
+                .RemoveDuplicates()
                 .SelectMany(async chunk => {
                     await OnNextAsync(chunk);
                     return Unit.Default;
@@ -203,11 +213,12 @@
         }
         else
         {
-            await Start();
+            _initialize = false;
             AutoPlay = true;
             await InitializeHandling();
         }
 
+        await AutoPlayChanged.InvokeAsync(AutoPlay);
         await InvokeAsync(StateHasChanged);
     }
     
@@ -219,6 +230,7 @@
         if (_instance is null) return;
         
         await _instance.InvokeVoidAsync("start");
+        // await TryUnlockAudio();
     }
     
     /// <summary>
@@ -229,6 +241,23 @@
         if (_instance is null) return;
         
         await _instance.InvokeVoidAsync("stop");
+    }
+    
+    /// <summary>
+    /// Attempts to unlock the audio system by invoking the 'unlockAudio' JavaScript function.
+    /// </summary>
+    private async Task TryUnlockAudio()
+    {
+        if (_instance is null) return;
+        
+        try 
+        {
+            await _instance.InvokeVoidAsync("unlockAudio");
+        }
+        catch (Exception ex)
+        {
+            throw new Exception($"Audio unlock failed: {ex.Message}");
+        }
     }
     
     /// <summary>
