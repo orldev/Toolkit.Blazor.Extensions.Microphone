@@ -157,6 +157,7 @@
         {
             await Start();
             _subscription = StreamBytes
+                .RemoveDuplicates()
                 .SelectMany(async chunk => {
                     await OnNextAsync(chunk);
                     return Unit.Default;

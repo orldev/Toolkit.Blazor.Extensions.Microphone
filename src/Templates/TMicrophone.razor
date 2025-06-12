@@ -93,10 +93,11 @@
         try
         {
             _buffer = [];
-            _subscription = _subject.Subscribe(onNext: bytes =>
-            {
-                _buffer?.Add(bytes);
-            });
+            _subscription = _subject.RemoveDuplicates()
+                .Subscribe(onNext: bytes =>
+                {
+                    _buffer?.Add(bytes);
+                });
         }
         catch (Exception ex)
         {
@@ -169,7 +170,7 @@
         // Initialize stream if StreamBytes callback is configured
         if (StreamBytes.HasDelegate)
         {
-            await StreamBytes.InvokeAsync(_subject.AsObservable());   
+            await StreamBytes.InvokeAsync(_subject.RemoveDuplicates().AsObservable());   
         }
 
         try
