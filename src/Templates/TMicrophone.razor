@@ -37,6 +37,11 @@
     /// </summary>
     [Parameter] public bool Enable { get; set; }
     
+    /// <summary>
+    /// Gets or sets a callback that is invoked when the <see cref="Enable"/> property changes.
+    /// </summary>
+    [Parameter] public EventCallback<bool> EnableChanged { get; set; }
+    
     private readonly Subject<byte[]> _subject = new();
     private DotNetObjectReference<TMicrophone>? _dotNetRef;
     private IJSObjectReference? _module;
@@ -132,6 +137,8 @@
             await Start();
             Enable = true;    
         }
+
+        await EnableChanged.InvokeAsync(Enable);
     }
     
     /// <summary>

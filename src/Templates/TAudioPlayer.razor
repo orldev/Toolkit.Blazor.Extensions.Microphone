@@ -38,6 +38,11 @@
     /// </summary>
     [Parameter] public bool AutoPlay { get; set; }
     
+    /// <summary>
+    /// Gets or sets a callback that is invoked when the <see cref="AutoPlay"/> state changes.
+    /// </summary>
+    [Parameter] public EventCallback<bool> AutoPlayChanged { get; set; }
+    
     private IJSObjectReference? _module;
     private IJSObjectReference? _instance;
     private IDisposable? _subscription;
@@ -118,7 +123,6 @@
         _initialize = true;
         _subscription?.Dispose();
         await Start();
-        _subscription?.Dispose();
         
         _subscription = Observable.Create<byte[]>(async (observer, token) =>
             {
@@ -214,6 +218,7 @@
             await InitializeHandling();
         }
 
+        await AutoPlayChanged.InvokeAsync(AutoPlay);
         await InvokeAsync(StateHasChanged);
     }
     
